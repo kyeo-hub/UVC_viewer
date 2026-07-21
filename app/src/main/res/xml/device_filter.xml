@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- UVC 设备过滤：匹配 USB Video Class (0x0e) 的常见接口类/子类 -->
+    <usb-device
+        class="14"
+        subclass="2"
+        protocol="0" />
+</resources>

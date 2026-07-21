@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">UVC Viewer</string>
+
+    <!-- 状态提示 -->
+    <string name="status_waiting">等待 USB 视频设备接入…</string>
+    <string name="status_connected">设备已连接</string>
+    <string name="status_disconnected">设备已断开</string>
+    <string name="status_error">发生错误：%1$s</string>
+
+    <!-- 按钮 -->
+    <string name="btn_pause">暂停</string>
+    <string name="btn_resume">继续</string>
+    <string name="btn_resolution">分辨率</string>
+
+    <!-- 权限 -->
+    <string name="usb_permission_title">USB 设备权限</string>
+    <string name="usb_permission_msg">应用需要访问 USB 视频采集设备才能显示画面。</string>
+    <string name="usb_permission_denied">已拒绝 USB 设备访问权限</string>
+</resources>

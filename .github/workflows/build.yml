@@ -36,7 +36,15 @@ jobs:
       - name: Get version name
         id: version
         run: |
-          VERSION=$(./gradlew -q properties --no-daemon | grep '^versionName:' | awk '{print $2}')
+          # gradlew properties 把 versionName 输出为 "versionName: 1.0.0"，跨平台用 grep -E
+          VERSION=$(./gradlew -q properties --no-daemon \
+            | grep -E '^versionName:' \
+            | head -1 \
+            | sed -E 's/^versionName:[[:space:]]*//')
+          if [ -z "${VERSION}" ]; then
+            # 兜底：从 git tag 名取版本（v1.0.0 → 1.0.0）
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "Version: ${VERSION}"
 

@@ -1,19 +1,20 @@
 package com.example.uvcviewer.camera
 
 import android.hardware.usb.UsbDevice
-import android.view.SurfaceHolder
-import com.serenegiant.usb.UVCCamera
-import com.serenegiant.usb.USBMonitor
+import android.view.Surface
+import com.herohan.uvcapp.CameraHelper
+import com.herohan.uvcapp.ICameraHelper
+import com.serenegiant.usb.Size
 
 /**
- * UVC 相机管理器：封装 USBMonitor + UVCCamera 的连接生命周期。
+ * UVC 相机管理器：封装 com.herohan:UVCAndroid 的 CameraHelper 生命周期。
  *
  * 外部使用流程：
- *   1. register() / unregister()  → 注册/反注册 USB 监听
- *   2. requestPermission(device)  → 申请 USB 权限并自动打开
+ *   1. init()           → 创建 CameraHelper 并绑定 StateCallback
+ *   2. selectDevice()   → 选定 UVC 设备并自动打开
  *   3. pausePreview() / resumePreview()
  *   4. setPreviewSize() / getSupportedSizes()
- *   5. release()                  → 彻底释放
+ *   5. release()        → 彻底释放
  *
  * 错误通过 [onError] 回调上抛。
  */
@@ -23,18 +24,17 @@ class UvcCameraManager(
     private val onError: (String) -> Unit
 ) {
 
-    private var usbMonitor: USBMonitor? = null
-    private var uvcCamera: UVCCamera? = null
+    private var helper: CameraHelper? = null
     private var currentDevice: UsbDevice? = null
 
-    /** Surface 已就绪时由外部传入的 holder。 */
-    private var surfaceHolder: SurfaceHolder? = null
+    /** 外部传入的预览 Surface（来自 SurfaceView.getHolder 或 TextureView）。 */
+    private var previewSurface: Surface? = null
 
     /** 当前是否处于"暂停"状态（UI 暂停按钮）。 */
     @Volatile
     private var isPaused = false
 
-    /** UVCCamera 内部状态：是否已成功 startPreview。 */
+    /** 是否已成功 startPreview。 */
     @Volatile
     private var isPreviewing = false
 
@@ -43,71 +43,70 @@ class UvcCameraManager(
     // ------------------------------------------------------------------
 
     /**
-     * 初始化 USBMonitor 并绑定 device attach/detach 回调。
-     * 调用时机：Activity onCreate 之后、surfaceCreated 之前均可。
+     * 创建 CameraHelper 并绑定 StateCallback。调用时机：Activity onCreate 之后。
      */
-    fun init(monitor: USBMonitor) {
-        usbMonitor = monitor
-    }
+    fun init() {
+        val h = CameraHelper()
+        helper = h
+        h.setStateCallback(object : ICameraHelper.StateCallback {
+            override fun onAttach(device: UsbDevice?) {
+                // 由外部 MainActivity 的 USB intent 处理；此处不重复 select
+            }
 
-    fun register() {
-        usbMonitor?.register()
-    }
+            override fun onDeviceOpen(device: UsbDevice?, isFirstOpen: Boolean) {
+                device ?: return
+                // 设备已授权并打开，继续 openCamera
+                try {
+                    h.openCamera()
+                    tryStartPreview()
+                    onConnected()
+                } catch (e: Exception) {
+                    onError(e.message ?: "openCamera failed")
+                }
+            }
 
-    fun unregister() {
-        usbMonitor?.unregister()
+            override fun onCameraOpen(device: UsbDevice?) {
+                // camera 已打开，可开始预览
+                tryStartPreview()
+                onConnected()
+            }
+
+            override fun onCameraClose(device: UsbDevice?) {
+                isPreviewing = false
+                onDisconnected()
+            }
+
+            override fun onDeviceClose(device: UsbDevice?) {
+                isPreviewing = false
+                currentDevice = null
+                onDisconnected()
+            }
+
+            override fun onDetach(device: UsbDevice?) {
+                isPreviewing = false
+                currentDevice = null
+                onDisconnected()
+            }
+
+            override fun onCancel(device: UsbDevice?) {
+                // 用户取消授权
+            }
+        })
     }
 
     /**
-     * 绑定外部 SurfaceHolder。surfaceCreated 时调用。
+     * 选定 USB 设备。外部在 USB_DEVICE_ATTACHED intent 或 StateCallback.onAttach 时调用。
      */
-    fun setSurfaceHolder(holder: SurfaceHolder?) {
-        surfaceHolder = holder
-    }
-
-    // ------------------------------------------------------------------
-    // 权限与打开
-    // ------------------------------------------------------------------
-
-    /**
-     * 申请 USB 权限；权限通过后由 USBMonitor 的 onConnect 回调打开相机。
-     */
-    fun requestPermission(device: UsbDevice) {
-        usbMonitor?.requestPermission(device)
-    }
-
-    // ------------------------------------------------------------------
-    // 内部：被 USBMonitor.onConnect 回调
-    // ------------------------------------------------------------------
-
-    /**
-     * 实际打开 UVC 设备。由外部在 USBMonitor.onConnect 回调中调用。
-     */
-    fun openCamera(device: UsbDevice, ctrlBlock: USBMonitor.UsbControlBlock) {
+    fun selectDevice(device: UsbDevice) {
         currentDevice = device
-        releaseCameraQuietly()
-
-        try {
-            val camera = UVCCamera()
-            camera.open(ctrlBlock)
-
-            // 立即尝试 startPreview；若 surface 尚未就绪则等待 setSurfaceHolder
-            uvcCamera = camera
-            tryStartPreview()
-            onConnected()
-        } catch (e: Exception) {
-            onError(e.message ?: "Open camera failed")
-        }
+        helper?.selectDevice(device)
     }
 
     /**
-     * 设备物理断开或权限丢失时调用。
+     * 绑定外部预览 Surface。surfaceCreated 时调用。
      */
-    fun closeCamera() {
-        releaseCameraQuietly()
-        currentDevice = null
-        isPreviewing = false
-        onDisconnected()
+    fun setPreviewSurface(surface: Surface?) {
+        previewSurface = surface
     }
 
     // ------------------------------------------------------------------
@@ -131,13 +130,12 @@ class UvcCameraManager(
     // ------------------------------------------------------------------
 
     /**
-     * 返回当前设备支持的预览分辨率（来自 UVCCamera.getSupportedSizeList）。
-     * 若相机未打开则返回空列表。
+     * 返回当前设备支持的预览分辨率。若相机未打开则返回空列表。
      */
-    fun getSupportedSizes(): List<UVCCamera.Size> {
-        val camera = uvcCamera ?: return emptyList()
+    fun getSupportedSizes(): List<Size> {
+        val h = helper ?: return emptyList()
         return try {
-            camera.supportedSizeList
+            h.supportedSizeList ?: emptyList()
         } catch (_: Exception) {
             emptyList()
         }
@@ -146,11 +144,11 @@ class UvcCameraManager(
     /**
      * 切换预览分辨率。需要重新 startPreview。
      */
-    fun setPreviewSize(width: Int, height: Int): Boolean {
-        val camera = uvcCamera ?: return false
+    fun setPreviewSize(size: Size): Boolean {
+        val h = helper ?: return false
         return try {
             stopPreviewQuietly()
-            camera.setPreviewSize(width, height)
+            h.setPreviewSize(size)
             tryStartPreview()
             true
         } catch (e: Exception) {
@@ -164,17 +162,10 @@ class UvcCameraManager(
     // ------------------------------------------------------------------
 
     fun release() {
-        releaseCameraQuietly()
-        usbMonitor?.let { monitor ->
-            try {
-                monitor.unregister()
-                monitor.destroy()
-            } catch (_: Exception) {
-                // 忽略释放过程中的异常
-            }
-        }
-        usbMonitor = null
-        surfaceHolder = null
+        stopPreviewQuietly()
+        helper?.release()
+        helper = null
+        previewSurface = null
         currentDevice = null
     }
 
@@ -183,17 +174,13 @@ class UvcCameraManager(
     // ------------------------------------------------------------------
 
     private fun tryStartPreview() {
-        val camera = uvcCamera ?: return
-        val holder = surfaceHolder ?: return
+        val h = helper ?: return
+        val surface = previewSurface ?: return
         if (isPaused || isPreviewing) return
+        if (!h.isCameraOpened) return
         try {
-            // 首次打开时 previewWidth/Height 可能为 0，统一用默认分辨率启动
-            camera.setPreviewSize(
-                UVCCamera.DEFAULT_PREVIEW_WIDTH,
-                UVCCamera.DEFAULT_PREVIEW_HEIGHT
-            )
-            camera.setPreviewDisplay(holder)
-            camera.startPreview()
+            h.addSurface(surface, false)
+            h.startPreview()
             isPreviewing = true
         } catch (e: Exception) {
             onError(e.message ?: "startPreview failed")
@@ -201,23 +188,14 @@ class UvcCameraManager(
     }
 
     private fun stopPreviewQuietly() {
-        val camera = uvcCamera ?: return
+        val h = helper ?: return
+        val surface = previewSurface ?: return
         try {
-            camera.stopPreview()
+            h.stopPreview()
+            h.removeSurface(surface)
         } catch (_: Exception) {
             // 忽略
         }
         isPreviewing = false
-    }
-
-    private fun releaseCameraQuietly() {
-        val camera = uvcCamera ?: return
-        try {
-            stopPreviewQuietly()
-            camera.close()
-        } catch (_: Exception) {
-            // 忽略
-        }
-        uvcCamera = null
     }
 }

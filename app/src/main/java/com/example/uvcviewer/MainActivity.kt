@@ -1,14 +1,16 @@
 package com.example.uvcviewer
 
 import android.app.AlertDialog
+import android.content.Intent
 import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbManager
 import android.os.Bundle
 import android.util.Log
 import android.view.View
 import androidx.appcompat.app.AppCompatActivity
 import com.example.uvcviewer.camera.UvcCameraManager
 import com.example.uvcviewer.databinding.ActivityMainBinding
-import com.serenegiant.usb.USBMonitor
+import com.serenegiant.usb.Size
 
 class MainActivity : AppCompatActivity() {
 
@@ -18,90 +20,34 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
 
-    /** USB 设备监听器（来自 UVCCamera 库）。 */
-    private var usbMonitor: USBMonitor? = null
-
-    /** UVC 相机管理器。 */
+    /** UVC 相机管理器（封装 com.herohan:UVCAndroid 的 CameraHelper）。 */
     private lateinit var cameraManager: UvcCameraManager
 
-    /** 当前连接的 UVC 设备。 */
+    /** 当前已选定的 UVC 设备。 */
     private var currentDevice: UsbDevice? = null
-
-    // ------------------------------------------------------------------
-    // USBMonitor 回调
-    // ------------------------------------------------------------------
-
-    /**
-     * USBMonitor 的 attach 回调：
-     *  - 若是 UVC 设备（class 14 = VIDEO）则自动申请权限
-     *  - 权限通过后由 onConnect 打开相机
-     */
-    private val deviceAttachListener = object : USBMonitor.OnDeviceConnectListener {
-        override fun onAttach(device: UsbDevice?) {
-            device ?: return
-            Log.i(TAG, "USB attached: ${device.deviceName} cls=${device.deviceClass}")
-
-            // 仅处理 UVC 类设备；放宽判断：vendor=0 或 class=0 时也尝试
-            val isUvc = (device.deviceClass == 14) || device.interfaceCount > 0
-            if (!isUvc) return
-
-            currentDevice = device
-            usbMonitor?.requestPermission(device)
-        }
-
-        override fun onDettach(device: UsbDevice?) {
-            Log.i(TAG, "USB detached")
-            cameraManager.closeCamera()
-            currentDevice = null
-        }
-
-        override fun onConnect(device: UsbDevice?, ctrlBlock: USBMonitor.UsbControlBlock?) {
-            device ?: return
-            ctrlBlock ?: return
-            Log.i(TAG, "USB connect: ${device.deviceName}")
-            cameraManager.openCamera(device, ctrlBlock)
-        }
-
-        override fun onDisconnect(device: UsbDevice?, ctrlBlock: USBMonitor.UsbControlBlock?) {
-            Log.i(TAG, "USB disconnect")
-            cameraManager.closeCamera()
-        }
-
-        override fun onCancel(device: UsbDevice?) {
-            // 用户取消授权
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Activity 生命周期
-    // ------------------------------------------------------------------
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // 1. 初始化 UvcCameraManager
+        // 1. 初始化 UvcCameraManager（内部会创建 CameraHelper 并绑定 StateCallback）
         cameraManager = UvcCameraManager(
             onConnected = { setStatus(R.string.status_connected, false) },
             onDisconnected = { setStatus(R.string.status_disconnected, true) },
             onError = { msg -> setStatus(getString(R.string.status_error, msg), true) }
         )
+        cameraManager.init()
 
-        // 2. 创建 USBMonitor 并绑定回调
-        usbMonitor = USBMonitor(this, deviceAttachListener).also {
-            cameraManager.init(it)
-        }
-
-        // 3. 绑定 SurfaceView 回调
-        binding.cameraView.onSurfaceReady = { holder ->
-            cameraManager.setSurfaceHolder(holder)
+        // 2. 绑定 SurfaceView 回调：把 Surface 交给 CameraHelper.addSurface
+        binding.cameraView.onSurfaceReady = { surface ->
+            cameraManager.setPreviewSurface(surface)
         }
         binding.cameraView.onSurfaceDestroyed = {
-            cameraManager.setSurfaceHolder(null)
+            cameraManager.setPreviewSurface(null)
         }
 
-        // 4. 按钮：暂停 / 继续
+        // 3. 按钮：暂停 / 继续
         var paused = false
         binding.btnPause.setOnClickListener {
             paused = !paused
@@ -114,31 +60,41 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 5. 按钮：分辨率切换
+        // 4. 按钮：分辨率切换
         binding.btnResolution.setOnClickListener {
             showResolutionPicker()
         }
+
+        // 5. 处理插入设备时由 manifest intent-filter 自动触发的 ATTACHED intent
+        handleAttachIntent(intent)
 
         // 6. 初始状态：显示"等待接入"提示
         setStatus(R.string.status_waiting, true)
     }
 
-    override fun onResume() {
-        super.onResume()
-        // 注册 USB 监听，开启 attach 广播接收
-        usbMonitor?.register()
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleAttachIntent(intent)
     }
 
-    override fun onPause() {
-        super.onPause()
-        // 反注册监听；相机仍保持连接（不释放，便于快速恢复）
-        usbMonitor?.unregister()
+    /**
+     * 处理 ACTION_USB_DEVICE_ATTACHED：拿到设备后调 selectDevice。
+     * CameraHelper 的 StateCallback.onDeviceOpen 会继续走 openCamera + startPreview。
+     */
+    private fun handleAttachIntent(intent: Intent?) {
+        intent ?: return
+        if (intent.action != UsbManager.ACTION_USB_DEVICE_ATTACHED) return
+        val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+        device ?: return
+        Log.i(TAG, "USB attached: ${device.deviceName}")
+        currentDevice = device
+        cameraManager.selectDevice(device)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         cameraManager.release()
-        usbMonitor = null
     }
 
     // ------------------------------------------------------------------
@@ -172,8 +128,8 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle(R.string.btn_resolution)
             .setItems(labels) { _, which ->
-                val s = sizes[which]
-                cameraManager.setPreviewSize(s.width, s.height)
+                val s: Size = sizes[which]
+                cameraManager.setPreviewSize(s)
             }
             .show()
     }

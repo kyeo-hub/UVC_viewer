@@ -60,8 +60,16 @@ class MainActivity : AppCompatActivity() {
 
         // 1. 初始化 UvcCameraManager（内部会创建 CameraHelper 并绑定 StateCallback）
         cameraManager = UvcCameraManager(
-            onConnected = { setStatus(R.string.status_connected, false) },
-            onDisconnected = { setStatus(R.string.status_disconnected, true) },
+            onConnected = {
+                setStatus(R.string.status_connected, false)
+                // 有信号时保持屏幕常亮，防止息屏
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            },
+            onDisconnected = {
+                setStatus(R.string.status_disconnected, true)
+                // 断开后恢复系统熄屏策略
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            },
             onError = { msg -> setStatus(getString(R.string.status_error, msg), true) }
         )
         cameraManager.init()

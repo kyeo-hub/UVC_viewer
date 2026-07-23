@@ -10,7 +10,12 @@ import android.hardware.usb.UsbManager
 import android.os.Bundle
 import android.util.Log
 import android.view.View
+import android.view.WindowManager
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.example.uvcviewer.camera.UvcCameraManager
 import com.example.uvcviewer.databinding.ActivityMainBinding
 import com.serenegiant.usb.Size
@@ -25,6 +30,12 @@ class MainActivity : AppCompatActivity() {
 
     /** UVC 相机管理器（封装 com.herohan:UVCAndroid 的 CameraHelper）。 */
     private lateinit var cameraManager: UvcCameraManager
+
+    /** 全屏切换状态。 */
+    private var isFullscreen = false
+
+    /** 记录进入全屏前 statusText 是否可见，退出全屏时恢复。 */
+    private var statusTextWasVisible = true
 
     /** 前台 USB 设备插拔监听器。APP 前台运行时系统不发 ATTACHED intent，必须主动注册。 */
     private val usbReceiver = object : BroadcastReceiver() {
@@ -81,10 +92,15 @@ class MainActivity : AppCompatActivity() {
             showResolutionPicker()
         }
 
-        // 5. 处理冷启动时由 manifest intent-filter 自动触发的 ATTACHED intent
+        // 5. 点击画面切换全屏 / 普通模式
+        binding.cameraView.setOnClickListener {
+            toggleUiVisibility()
+        }
+
+        // 6. 处理冷启动时由 manifest intent-filter 自动触发的 ATTACHED intent
         handleAttachIntent(intent)
 
-        // 6. 初始状态：显示"等待接入"提示
+        // 7. 初始状态：显示"等待接入"提示
         setStatus(R.string.status_waiting, true)
     }
 
@@ -130,6 +146,42 @@ class MainActivity : AppCompatActivity() {
     // ------------------------------------------------------------------
     // UI 辅助
     // ------------------------------------------------------------------
+
+    /**
+     * 切换全屏 / 普通模式。
+     * 全屏时隐藏系统状态栏/导航栏 + 控制按钮 + 状态文本，画面沉浸。
+     * 再次点击恢复。
+     */
+    private fun toggleUiVisibility() {
+        isFullscreen = !isFullscreen
+        if (isFullscreen) {
+            // 记录进入全屏前 statusText 的状态，退出时恢复
+            statusTextWasVisible = binding.statusText.visibility == View.VISIBLE
+            binding.statusText.visibility = View.GONE
+            binding.controlBar.visibility = View.GONE
+            setSystemUiFullscreen(true)
+        } else {
+            binding.statusText.visibility = if (statusTextWasVisible) View.VISIBLE else View.GONE
+            binding.controlBar.visibility = View.VISIBLE
+            setSystemUiFullscreen(false)
+        }
+    }
+
+    /**
+     * 使用 WindowInsetsControllerCompat 切换沉浸式全屏（API 30+ 兼容方案）。
+     * 启用时隐藏系统栏（状态栏 + 导航栏），点击时短暂显示后自动隐回（IMMERSIVE_STICKY）。
+     */
+    private fun setSystemUiFullscreen(enable: Boolean) {
+        WindowCompat.setDecorFitsSystemWindows(window, !enable)
+        val controller = WindowInsetsControllerCompat(window, binding.cameraView)
+        if (enable) {
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        } else {
+            controller.show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
 
     private fun setStatus(textResId: Int, visible: Boolean) {
         setStatus(getString(textResId), visible)

@@ -72,7 +72,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: uvc-viewer-apk
-          path: app/build/outputs/apk/release/*.apk
+          # 只上传 renamed 的最终 APK，跳过 unsigned/aligned/signed 中间产物
+          path: app/build/outputs/apk/release/uvc-viewer-*.apk
           retention-days: 30
 
   release:

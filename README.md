@@ -1,6 +1,7 @@
-# UVC Viewer
+# PureView
 
 一个极简的 Android 应用：插上 USB HDMI 视频采集卡即可在手机/平板上预览画面。
+纯粹、无广告、无多余功能，把你的 Android 设备变成便携显示器。
 
 ## 特性
 

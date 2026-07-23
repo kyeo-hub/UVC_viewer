@@ -1,7 +1,10 @@
 package com.example.uvcviewer
 
 import android.app.AlertDialog
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Bundle
@@ -23,8 +26,21 @@ class MainActivity : AppCompatActivity() {
     /** UVC 相机管理器（封装 com.herohan:UVCAndroid 的 CameraHelper）。 */
     private lateinit var cameraManager: UvcCameraManager
 
-    /** 当前已选定的 UVC 设备。 */
-    private var currentDevice: UsbDevice? = null
+    /** 前台 USB 设备插拔监听器。APP 前台运行时系统不发 ATTACHED intent，必须主动注册。 */
+    private val usbReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            intent ?: return
+            when (intent.action) {
+                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                    val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                    device ?: return
+                    Log.i(TAG, "USB attached (foreground): ${device.deviceName}")
+                    cameraManager.selectDevice(device)
+                }
+                // DETACHED 时由 UvcCameraManager 的 onDetach 回调处理（含防抖），这里不重复
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,7 +81,7 @@ class MainActivity : AppCompatActivity() {
             showResolutionPicker()
         }
 
-        // 5. 处理插入设备时由 manifest intent-filter 自动触发的 ATTACHED intent
+        // 5. 处理冷启动时由 manifest intent-filter 自动触发的 ATTACHED intent
         handleAttachIntent(intent)
 
         // 6. 初始状态：显示"等待接入"提示
@@ -78,17 +94,31 @@ class MainActivity : AppCompatActivity() {
         handleAttachIntent(intent)
     }
 
+    override fun onResume() {
+        super.onResume()
+        // 修复 Bug 2：APP 前台运行时系统不再发 ACTION_USB_DEVICE_ATTACHED，
+        // 必须主动注册 BroadcastReceiver 才能收到插设备事件
+        val filter = IntentFilter(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+        registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // 反注册避免泄漏
+        try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
+    }
+
     /**
      * 处理 ACTION_USB_DEVICE_ATTACHED：拿到设备后调 selectDevice。
      * CameraHelper 的 StateCallback.onDeviceOpen 会继续走 openCamera + startPreview。
+     * 仅在冷启动 / manifest intent-filter 触发时生效；前台插设备走 usbReceiver。
      */
     private fun handleAttachIntent(intent: Intent?) {
         intent ?: return
         if (intent.action != UsbManager.ACTION_USB_DEVICE_ATTACHED) return
         val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
         device ?: return
-        Log.i(TAG, "USB attached: ${device.deviceName}")
-        currentDevice = device
+        Log.i(TAG, "USB attached (cold start): ${device.deviceName}")
         cameraManager.selectDevice(device)
     }
 

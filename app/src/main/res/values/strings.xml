@@ -12,6 +12,8 @@
     <string name="btn_pause">暂停</string>
     <string name="btn_resume">继续</string>
     <string name="btn_resolution">分辨率</string>
+    <string name="btn_compat_off">兼容:关</string>
+    <string name="btn_compat_on">兼容:开</string>
 
     <!-- 权限 -->
     <string name="usb_permission_title">USB 设备权限</string>

@@ -12,7 +12,6 @@ import android.util.Log
 import android.view.View
 import android.view.WindowManager
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -100,7 +99,15 @@ class MainActivity : AppCompatActivity() {
             showResolutionPicker()
         }
 
-        // 5. 点击画面切换全屏 / 普通模式
+        // 5. 兼容模式开关
+        var compatOn = false
+        binding.btnCompatibility.setOnClickListener {
+            compatOn = !compatOn
+            cameraManager.compatibilityMode = compatOn
+            binding.btnCompatibility.text = if (compatOn) getString(R.string.btn_compat_on) else getString(R.string.btn_compat_off)
+        }
+
+        // 6. 点击画面切换全屏 / 普通模式
         binding.cameraView.setOnClickListener {
             toggleUiVisibility()
         }

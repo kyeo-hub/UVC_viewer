@@ -38,6 +38,10 @@ class UvcCameraManager(
     @Volatile
     private var isPreviewing = false
 
+    /** 兼容模式：强制用低分辨率（320×240）减少 USB 带宽需求，缓解低端 SoC UVC 瞬断。 */
+    @Volatile
+    var compatibilityMode: Boolean = false
+
     /** 主线程 Handler，用于防抖和重连定时器。 */
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -107,10 +111,8 @@ class UvcCameraManager(
 
             override fun onCameraClose(device: UsbDevice?) {
                 isPreviewing = false
-                // 先防抖：如果短时间内恢复，不报断开
-                if (scheduleDebouncedDisconnect()) {
-                    // 防抖已就绪，重连逻辑在防抖到期后触发
-                }
+                // 防抖：如果短时间内恢复，不报断开，到期后触发自动重连
+                scheduleDebouncedDisconnect()
             }
 
             override fun onDeviceClose(device: UsbDevice?) {
@@ -265,13 +267,14 @@ class UvcCameraManager(
     // ------------------------------------------------------------------
 
     fun release() {
-        resetReconnectState()
         detachDebouncePending = false
+        resetReconnectState()
         stopPreviewQuietly()
         helper?.release()
         helper = null
         previewSurface = null
         currentDevice = null
+        lastSelectedSerial = null
     }
 
     // ------------------------------------------------------------------
@@ -284,11 +287,33 @@ class UvcCameraManager(
         if (isPaused || isPreviewing) return
         if (!h.isCameraOpened) return
         try {
+            // 兼容模式：先尝试设置低分辨率 320×240，降低 USB 带宽需求
+            if (compatibilityMode) {
+                applyCompatibilityResolution(h)
+            }
             h.addSurface(surface, false)
             h.startPreview()
             isPreviewing = true
         } catch (e: Exception) {
             onError(e.message ?: "startPreview failed")
+        }
+    }
+
+    /** 兼容模式：尝试 320×240，不可用则用支持列表中的最低分辨率。 */
+    private fun applyCompatibilityResolution(h: CameraHelper) {
+        try {
+            val sizes = h.supportedSizeList
+            if (!sizes.isNullOrEmpty()) {
+                // 优先找 320×240
+                var target = sizes.find { it.width == 320 && it.height == 240 }
+                // 其次找 640×480
+                if (target == null) target = sizes.find { it.width == 640 && it.height == 480 }
+                // 最后取宽度最小的
+                if (target == null) target = sizes.minByOrNull { it.width }
+                if (target != null) h.setPreviewSize(target)
+            }
+        } catch (_: Exception) {
+            // 静默忽略，用默认分辨率
         }
     }
 

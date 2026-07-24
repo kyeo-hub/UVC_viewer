@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">PureView</string>
+    <string name="app_name">纯视</string>
 
     <!-- 状态提示 -->
     <string name="status_waiting">等待 USB 视频设备接入…</string>

@@ -65,15 +65,15 @@ jobs:
           APK_DIR="app/build/outputs/apk/release"
           VERSION="${{ steps.version.outputs.version }}"
           cp "${{ steps.sign.outputs.signedReleaseFile }}" \
-             "${APK_DIR}/uvc-viewer-${VERSION}.apk"
-          echo "Final APK: ${APK_DIR}/uvc-viewer-${VERSION}.apk"
+             "${APK_DIR}/PureView-${VERSION}.apk"
+          echo "Final APK: ${APK_DIR}/PureView-${VERSION}.apk"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: uvc-viewer-apk
+          name: pureview-apk
           # 只上传 renamed 的最终 APK，跳过 unsigned/aligned/signed 中间产物
-          path: app/build/outputs/apk/release/uvc-viewer-*.apk
+          path: app/build/outputs/apk/release/PureView-*.apk
           retention-days: 30
 
   release:

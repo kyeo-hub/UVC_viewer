@@ -99,15 +99,7 @@ class MainActivity : AppCompatActivity() {
             showResolutionPicker()
         }
 
-        // 5. 兼容模式开关
-        var compatOn = false
-        binding.btnCompatibility.setOnClickListener {
-            compatOn = !compatOn
-            cameraManager.compatibilityMode = compatOn
-            binding.btnCompatibility.text = if (compatOn) getString(R.string.btn_compat_on) else getString(R.string.btn_compat_off)
-        }
-
-        // 6. 点击画面切换全屏 / 普通模式
+        // 5. 点击画面切换全屏 / 普通模式
         binding.cameraView.setOnClickListener {
             toggleUiVisibility()
         }

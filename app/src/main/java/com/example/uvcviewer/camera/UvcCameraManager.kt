@@ -200,6 +200,11 @@ class UvcCameraManager(
 
     fun setPreviewSurface(surface: Surface?) {
         previewSurface = surface
+        // 修复：当 Surface 就绪时，如果相机已打开但尚未开始预览，立即启动
+        // 解决 Redmi Pad SE 上 "已连接但无画面" 的问题
+        if (surface != null && !isPreviewing && !isPaused && !isReconnecting) {
+            tryStartPreview()
+        }
     }
 
     // ------------------------------------------------------------------

@@ -11,10 +11,9 @@ import com.serenegiant.usb.Size
 /**
  * UVC 相机管理器：封装 com.herohan:UVCAndroid 的 CameraHelper 生命周期。
  *
- * 关键修复（v1.0.1）：
- *  - onAttach 时主动 selectDevice：解决"APP 前台运行时插设备不发 intent"导致无画面
- *  - onDetach 防抖 500ms 不清空 currentDevice：解决低端 SoC USB 瞬断导致状态闪烁
- *  - isFirstOpen 区分：重连时复用 currentDevice，避免 UI 闪烁
+ * 关键修复：
+ *  - v1.0.1: onAttach 主动 selectDevice / detach 防抖 500ms
+ *  - v1.0.5: 防抖延长到 3s，断开后自动重连（低端 SoC 骁龙680 USB 频繁瞬断）
  */
 class UvcCameraManager(
     private val onConnected: () -> Unit,
@@ -25,7 +24,7 @@ class UvcCameraManager(
     private var helper: CameraHelper? = null
     private var currentDevice: UsbDevice? = null
 
-    /** 外部传入的预览 Surface（来自 SurfaceView.getHolder 或 TextureView）。 */
+    /** 外部传入的预览 Surface（来自 SurfaceView.getHolder）。 */
     private var previewSurface: Surface? = null
 
     /** 当前是否处于"暂停"状态（UI 暂停按钮）。 */
@@ -36,30 +35,44 @@ class UvcCameraManager(
     @Volatile
     private var isPreviewing = false
 
-    /** 主线程 Handler，用于防抖和 UI 回调。 */
+    /** 主线程 Handler，用于防抖和重连定时器。 */
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    /** 防抖标记：onDetach 后 500ms 内若 onAttach 回来则合并，不报"已断开"。 */
+    // ---- 防抖 ----
+
+    /** onDetach 后等待设备恢复的时间窗口（骁龙680 USB 瞬断可达 1-2s）。 */
+    private val DETACH_DEBOUNCE_MS = 3000L
+
+    /** 防抖标记：窗口内若 onAttach 回来则合并，不报"已断开"。 */
     @Volatile
     private var detachDebouncePending = false
 
-    private val DETACH_DEBOUNCE_MS = 500L
+    // ---- 自动重连 ----
+
+    /** 是否正在执行自动重连流程。 */
+    @Volatile
+    private var isReconnecting = false
+
+    /** 最大自动重连尝试次数（防死循环）。 */
+    private val MAX_RECONNECT_ATTEMPTS = 5
+
+    /** 当前重连尝试次数。 */
+    private var reconnectAttempt = 0
+
+    /** 重连间隔（ms），逐次递增。 */
+    private val RECONNECT_INTERVAL_MS = 1500L
 
     // ------------------------------------------------------------------
     // 生命周期
     // ------------------------------------------------------------------
 
-    /**
-     * 创建 CameraHelper 并绑定 StateCallback。调用时机：Activity onCreate 之后。
-     */
     fun init() {
         val h = CameraHelper()
         helper = h
         h.setStateCallback(object : ICameraHelper.StateCallback {
             override fun onAttach(device: UsbDevice?) {
-                // 修复 Bug 2：APP 前台时插设备不发 intent，必须在这里主动 select
                 device ?: return
-                // 取消正在挂起的 detach 防抖（瞬断后又重连）
+                resetReconnectState()
                 detachDebouncePending = false
                 currentDevice = device
                 h.selectDevice(device)
@@ -67,12 +80,10 @@ class UvcCameraManager(
 
             override fun onDeviceOpen(device: UsbDevice?, isFirstOpen: Boolean) {
                 device ?: return
-                // 设备已授权并打开，继续 openCamera
-                // 取消任何挂起的 detach 防抖（设备真的回来了）
+                resetReconnectState()
                 detachDebouncePending = false
                 try {
                     h.openCamera()
-                    // tryStartPreview 由 onCameraOpen 回调触发更稳，这里不重复
                     onConnected()
                 } catch (e: Exception) {
                     onError(e.message ?: "openCamera failed")
@@ -80,68 +91,113 @@ class UvcCameraManager(
             }
 
             override fun onCameraOpen(device: UsbDevice?) {
-                // camera 已打开，可开始预览
+                resetReconnectState()
                 detachDebouncePending = false
                 tryStartPreview()
                 onConnected()
             }
 
             override fun onCameraClose(device: UsbDevice?) {
-                // 相机被关闭（设备瞬断常见）
                 isPreviewing = false
-                // 不立即报断开，等防抖窗口
-                scheduleDebouncedDisconnect()
+                // 先防抖：如果短时间内恢复，不报断开
+                if (scheduleDebouncedDisconnect()) {
+                    // 防抖已就绪，重连逻辑在防抖到期后触发
+                }
             }
 
             override fun onDeviceClose(device: UsbDevice?) {
-                // 设备连接关闭
                 isPreviewing = false
                 scheduleDebouncedDisconnect()
             }
 
             override fun onDetach(device: UsbDevice?) {
-                // 设备物理断开
                 isPreviewing = false
                 scheduleDebouncedDisconnect()
-                // 注意：不清空 currentDevice，以便重插时复用；
-                // 真正清空在 release() 或防抖窗口结束后的硬重置
             }
 
             override fun onCancel(device: UsbDevice?) {
-                // 用户取消授权
                 scheduleDebouncedDisconnect()
             }
         })
     }
 
     /**
-     * 防抖地触发 onDisconnected 回调。
-     * 若在 [DETACH_DEBOUNCE_MS] 内 onAttach/onDeviceOpen 回来，则取消本次回调，
-     * 避免 UI 闪烁（解决 Bug 1：低端 SoC USB 瞬断）。
+     * 防抖地触发断开回调。若防抖窗口内设备恢复，取消回调。
+     * 防抖到期后触发自动重连（而非直接报断开），给设备第二次机会。
+     *
+     * @return true 表示防抖已挂起
      */
-    private fun scheduleDebouncedDisconnect() {
-        if (detachDebouncePending) return
+    private fun scheduleDebouncedDisconnect(): Boolean {
+        if (detachDebouncePending) return false
         detachDebouncePending = true
         mainHandler.postDelayed({
             if (detachDebouncePending) {
                 detachDebouncePending = false
-                onDisconnected()
+                // 防抖到期仍未恢复，尝试自动重连
+                attemptReconnect()
             }
         }, DETACH_DEBOUNCE_MS)
+        return true
     }
 
+    // ------------------------------------------------------------------
+    // 自动重连
+    // ------------------------------------------------------------------
+
     /**
-     * 选定 USB 设备。外部在 USB_DEVICE_ATTACHED intent 或 BroadcastReceiver 时调用。
-     * 内部 onAttach 回调也会自动调，所以这里只是冗余入口。
+     * 尝试自动重连：重新 selectDevice + openCamera + startPreview。
+     * 最多尝试 [MAX_RECONNECT_ATTEMPTS] 次，逐次间隔递增。
      */
+    private fun attemptReconnect() {
+        val dev = currentDevice ?: return
+        val h = helper ?: return
+        if (isReconnecting || reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+            if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+                resetReconnectState()
+                onDisconnected()
+            }
+            return
+        }
+        isReconnecting = true
+        reconnectAttempt++
+
+        mainHandler.postDelayed({
+            isReconnecting = false
+            if (h.isCameraOpened) {
+                // 已经恢复，直接尝试预览
+                resetReconnectState()
+                tryStartPreview()
+                onConnected()
+            } else {
+                // 设备还在，尝试重新打开
+                try {
+                    h.selectDevice(dev)
+                    // selectDevice 会触发 onDeviceOpen → openCamera → onCameraOpen → tryStartPreview
+                    // 如果 selectDevice 失败，catch 里自动重试下一次
+                } catch (_: Exception) {
+                    // 重试
+                    attemptReconnect()
+                }
+            }
+        }, RECONNECT_INTERVAL_MS)
+    }
+
+    private fun resetReconnectState() {
+        isReconnecting = false
+        reconnectAttempt = 0
+        mainHandler.removeCallbacksAndMessages(null)
+    }
+
+    // ------------------------------------------------------------------
+    // 外部接口
+    // ------------------------------------------------------------------
+
     fun selectDevice(device: UsbDevice) {
         currentDevice = device
+        resetReconnectState()
         helper?.selectDevice(device)
     }
 
-    /**
-     * 绑定外部预览 Surface。surfaceCreated 时调用。
-     */
     fun setPreviewSurface(surface: Surface?) {
         previewSurface = surface
     }
@@ -166,9 +222,6 @@ class UvcCameraManager(
     // 分辨率
     // ------------------------------------------------------------------
 
-    /**
-     * 返回当前设备支持的预览分辨率。若相机未打开则返回空列表。
-     */
     fun getSupportedSizes(): List<Size> {
         val h = helper ?: return emptyList()
         return try {
@@ -178,9 +231,6 @@ class UvcCameraManager(
         }
     }
 
-    /**
-     * 切换预览分辨率。需要重新 startPreview。
-     */
     fun setPreviewSize(size: Size): Boolean {
         val h = helper ?: return false
         return try {
@@ -199,9 +249,8 @@ class UvcCameraManager(
     // ------------------------------------------------------------------
 
     fun release() {
-        // 取消可能挂起的防抖回调
+        resetReconnectState()
         detachDebouncePending = false
-        mainHandler.removeCallbacksAndMessages(null)
         stopPreviewQuietly()
         helper?.release()
         helper = null
@@ -234,7 +283,6 @@ class UvcCameraManager(
             h.stopPreview()
             h.removeSurface(surface)
         } catch (_: Exception) {
-            // 忽略
         }
         isPreviewing = false
     }

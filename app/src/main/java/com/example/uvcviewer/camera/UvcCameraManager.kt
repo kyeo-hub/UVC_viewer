@@ -24,6 +24,9 @@ class UvcCameraManager(
     private var helper: CameraHelper? = null
     private var currentDevice: UsbDevice? = null
 
+    /** 上次已调用 selectDevice 的设备 serial，防止 onAttach 和 BroadcastReceiver 重复调用。 */
+    private var lastSelectedSerial: String? = null
+
     /** 外部传入的预览 Surface（来自 SurfaceView.getHolder）。 */
     private var previewSurface: Surface? = null
 
@@ -75,7 +78,12 @@ class UvcCameraManager(
                 resetReconnectState()
                 detachDebouncePending = false
                 currentDevice = device
-                h.selectDevice(device)
+                // 防止 onAttach 和 BroadcastReceiver 同时重复调用 selectDevice
+                val serial = device.serialNumber ?: device.deviceName
+                if (serial != lastSelectedSerial) {
+                    lastSelectedSerial = serial
+                    h.selectDevice(device)
+                }
             }
 
             override fun onDeviceOpen(device: UsbDevice?, isFirstOpen: Boolean) {
@@ -193,6 +201,9 @@ class UvcCameraManager(
     // ------------------------------------------------------------------
 
     fun selectDevice(device: UsbDevice) {
+        val serial = device.serialNumber ?: device.deviceName
+        if (serial == lastSelectedSerial) return  // 已选过同一设备，防重复
+        lastSelectedSerial = serial
         currentDevice = device
         resetReconnectState()
         helper?.selectDevice(device)
